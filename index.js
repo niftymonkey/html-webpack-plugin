@@ -43,6 +43,7 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
   }
 
   compiler.plugin('make', function (compilation, callback) {
+    console.time('make - ' + filename);
     // Compile the template (queued)
     compilationPromise = childCompiler.compileTemplate(self.options.template, compiler.context, self.options.filename, compilation)
       .catch(function (err) {
@@ -59,14 +60,22 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
         self.childCompilationOutputName = compilationResult.outputName;
         callback();
         return compilationResult.content;
+      })
+      .then(function (content) {
+        console.timeEnd('make - ' + filename);
+        return content;
       });
   });
 
   compiler.plugin('emit', function (compilation, callback) {
+    console.time('emit - ' + filename);
     var applyPluginsAsyncWaterfall = self.applyPluginsAsyncWaterfall(compilation);
     // Get all chunks
+    console.time('[' + filename + '] - 1 - toJson');
     var allChunks = compilation.getStats().toJson().chunks;
+    console.timeEnd('[' + filename + '] - 1 - toJson');
     // Filter chunks (options.chunks and options.excludeCHunks)
+    console.time('[' + filename + '] - 2 - everything else before the promise chain');
     var chunks = self.filterChunks(allChunks, self.options.chunks, self.options.excludeChunks);
     // Sort chunks
     chunks = self.sortChunks(chunks, self.options.chunksSortMode);
@@ -88,10 +97,13 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
     } else {
       self.assetJson = assetJson;
     }
+    console.timeEnd('[' + filename + '] - 2 - everything else before the promise chain');
 
+    console.time('[' + filename + '] - 3 - promise chain');
     Promise.resolve()
       // Favicon
       .then(function () {
+        console.time('- favicon');
         if (self.options.favicon) {
           return self.addFileToAssets(self.options.favicon, compilation)
             .then(function (faviconBasename) {
@@ -105,9 +117,13 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
       })
       // Wait for the compilation to finish
       .then(function () {
+        console.timeEnd('- favicon');
+        console.time('- wait for compilation finish');
         return compilationPromise;
       })
       .then(function (compiledTemplate) {
+        console.timeEnd('- wait for compilation finish');
+        console.time('- custom function logic');
         // Allow to use a custom function / string instead
         if (self.options.templateContent !== undefined) {
           return self.options.templateContent;
@@ -119,17 +135,21 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
       // Allow plugins to make changes to the assets before invoking the template
       // This only makes sense to use if `inject` is `false`
       .then(function (compilationResult) {
+        console.timeEnd('- custom function logic');
+        console.time('- allow plugins to change assets');
         return applyPluginsAsyncWaterfall('html-webpack-plugin-before-html-generation', false, {
           assets: assets,
           outputName: self.childCompilationOutputName,
           plugin: self
         })
-        .then(function () {
-          return compilationResult;
-        });
+          .then(function () {
+            return compilationResult;
+          });
       })
       // Execute the template
       .then(function (compilationResult) {
+        console.timeEnd('- allow plugins to change assets');
+        console.time('- execute template');
         // If the loader result is a function execute it to retrieve the html
         // otherwise use the returned html
         return typeof compilationResult !== 'function'
@@ -138,10 +158,14 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
       })
       // Allow plugins to change the html before assets are injected
       .then(function (html) {
+        console.timeEnd('- execute template');
+        console.time('- allow plugins to change html BEFORE assets injected');
         var pluginArgs = {html: html, assets: assets, plugin: self, outputName: self.childCompilationOutputName};
         return applyPluginsAsyncWaterfall('html-webpack-plugin-before-html-processing', true, pluginArgs);
       })
       .then(function (result) {
+        console.timeEnd('- allow plugins to change html BEFORE assets injected');
+        console.time('- generate asset tags and post process html');
         var html = result.html;
         var assets = result.assets;
         // Prepare script and link tags
@@ -150,7 +174,7 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
         // Allow plugins to change the assetTag definitions
         return applyPluginsAsyncWaterfall('html-webpack-plugin-alter-asset-tags', true, pluginArgs)
           .then(function (result) {
-              // Add the stylesheets, scripts and so on to the resulting html
+            // Add the stylesheets, scripts and so on to the resulting html
             return self.postProcessHtml(html, assets, { body: result.body, head: result.head })
               .then(function (html) {
                 return _.extend(result, {html: html, assets: assets});
@@ -159,6 +183,8 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
       })
       // Allow plugins to change the html after assets are injected
       .then(function (result) {
+        console.timeEnd('- generate asset tags and post process html');
+        console.time('- allow plugins to change html AFTER assets injected');
         var html = result.html;
         var assets = result.assets;
         var pluginArgs = {html: html, assets: assets, plugin: self, outputName: self.childCompilationOutputName};
@@ -176,6 +202,8 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
         return self.options.showErrors ? prettyError(err, compiler.context).toHtml() : 'ERROR';
       })
       .then(function (html) {
+        console.timeEnd('- allow plugins to change html AFTER assets injected');
+        console.time('- add the compilation result to the webpack assets');
         // Replace the compilation result with the evaluated html code
         compilation.assets[self.childCompilationOutputName] = {
           source: function () {
@@ -187,6 +215,8 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
         };
       })
       .then(function () {
+        console.timeEnd('- add the compilation result to the webpack assets');
+        console.time('- let other plugins know that we are done');
         // Let other plugins know that we are done:
         return applyPluginsAsyncWaterfall('html-webpack-plugin-after-emit', false, {
           html: compilation.assets[self.childCompilationOutputName],
@@ -201,7 +231,12 @@ HtmlWebpackPlugin.prototype.apply = function (compiler) {
       })
       // Let webpack continue with it
       .finally(function () {
+        console.timeEnd('- let other plugins know that we are done');
+        console.time('- let webpack continue');
         callback();
+        console.timeEnd('- let webpack continue');
+        console.timeEnd('[' + filename + '] - 3 - promise chain');
+        console.timeEnd('emit - ' + filename);
         // Tell blue bird that we don't want to wait for callback.
         // Fixes "Warning: a promise was created in a handler but none were returned from it"
         // https://github.com/petkaantonov/bluebird/blob/master/docs/docs/warning-explanations.md#warning-a-promise-was-created-in-a-handler-but-none-were-returned-from-it
@@ -305,25 +340,25 @@ HtmlWebpackPlugin.prototype.postProcessHtml = function (html, assets, assetTags)
 HtmlWebpackPlugin.prototype.addFileToAssets = function (filename, compilation) {
   filename = path.resolve(compilation.compiler.context, filename);
   return Promise.props({
-    size: fs.statAsync(filename),
-    source: fs.readFileAsync(filename)
-  })
-  .catch(function () {
-    return Promise.reject(new Error('HtmlWebpackPlugin: could not load file ' + filename));
-  })
-  .then(function (results) {
-    var basename = path.basename(filename);
-    compilation.fileDependencies.push(filename);
-    compilation.assets[basename] = {
-      source: function () {
-        return results.source;
-      },
-      size: function () {
-        return results.size.size;
-      }
-    };
-    return basename;
-  });
+      size: fs.statAsync(filename),
+      source: fs.readFileAsync(filename)
+    })
+    .catch(function () {
+      return Promise.reject(new Error('HtmlWebpackPlugin: could not load file ' + filename));
+    })
+    .then(function (results) {
+      var basename = path.basename(filename);
+      compilation.fileDependencies.push(filename);
+      compilation.assets[basename] = {
+        source: function () {
+          return results.source;
+        },
+        size: function () {
+          return results.size.size;
+        }
+      };
+      return basename;
+    });
 };
 
 /**
